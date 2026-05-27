@@ -3,5 +3,5 @@ build/
 dist/
 *.egg-info/
 .eggs/
-.pytest_cache/
-__pycache__/
+eac-logchecker
+!eac-logchecker/

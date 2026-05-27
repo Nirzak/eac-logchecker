@@ -1,58 +1,63 @@
 # EAC Logchecker
 
-![Travis-CI Status](https://img.shields.io/travis/com/OPSnet/eac_logchecker.py/master.svg)
-![PyPI](https://img.shields.io/pypi/v/eac_logchecker.svg)
-
-This is a transparent implementation of the Exact Audio Copy log checksum algorithm in Python 3.5+.
+This is a transparent implementation of the Exact Audio Copy log checksum algorithm, written in Go.
 
 This is a fork of https://github.com/puddly/eac_logsigner, with modifications to have it
 better match the output of the actual EAC Logchecker to be used in downstream applications. All
 credit goes to puddly for reverse-engineering the closed source EAC to develop the base.
 
-## Requirements
-
-* Python 3.5+
-* [pprp](http://pypi.org/project/pprp)==0.2.6
-
 ## Installation
 
-From PyPI:
-
-    $ pip install eac-logchecker
-
-From source:
-
-    $ git clone https://github.com/OPSnet/eac_logchecker.py
-    $ cd eac_logchecker.py
-    $ python setup.py install
+Download from [releases](https://github.com/Nirzak/eac-logchecker/releases).
 
 ## Usage
 
-    usage: eac_logchecker.py [-h] [--json] file
+Verify logs:
 
-    Verifies and resigns EAC logs
+    Usage: eac-logchecker [--json] [--version] <file>
 
-    positional arguments:
-    file        input log file
+Sign or fix existing logs:
 
-    optional arguments:
-    -h, --help  show this help message and exit
-    --json      Output as JSON
+    Usage: eac-logchecker sign [--force] <input_log> <output_log>
 
 ## Example
 
-    $ eac_logchecker logs/01.log
+### Verify
+
+    $ ./eac-logchecker logs/01.log
     Log Integrity Checker   (C) 2010 by Andre Wiethoff
 
     1. Log entry is fine!
-    $ eac_logchecker logs/01.log
-    $ eac_logchecker logs/05.log
+
+    $ ./eac-logchecker logs/05.log
     Log Integrity Checker   (C) 2010 by Andre Wiethoff
 
     1. Log entry is fine!
     2. Log entry is fine!
-    $ eac_logchecker --json logs/05.log
+
+    $ ./eac-logchecker --json logs/05.log
     [{"message": "Log entry is fine!", "status": "OK"}, {"message": "Log entry is fine!", "status": "OK"}]
+
+### Sign
+
+    $ ./eac-logchecker sign logs/01.log signed.log
+    Signed: <CHECKSUM_HEX>
+
+
+## Use it as a go package
+
+```go
+import "github.com/Nirzak/eac-logchecker/eaclogchecker"
+
+// Verify a log
+results := eaclogchecker.CheckChecksum("path/to/file.log")
+for _, r := range results {
+    fmt.Println(r.Status, r.Message)
+}
+
+// Sign a log
+err := eaclogchecker.SignLog("input.log", "output.log", false)
+```
 
 ## Algorithm
 
