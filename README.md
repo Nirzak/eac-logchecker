@@ -6,17 +6,9 @@ This is a fork of https://github.com/puddly/eac_logsigner, with modifications to
 better match the output of the actual EAC Logchecker to be used in downstream applications. All
 credit goes to puddly for reverse-engineering the closed source EAC to develop the base.
 
-## Requirements
-
-* Go 1.21+
-
 ## Installation
 
-From source:
-
-    $ git clone https://github.com/OPSnet/eac_logchecker.go
-    $ cd eac_logchecker.go
-    $ go build -o eac-logchecker .
+Download from [releases](https://github.com/Nirzak/eac-logchecker/releases).
 
 ## Usage
 
@@ -50,6 +42,22 @@ Sign or fix existing logs:
 
     $ ./eac-logchecker sign logs/01.log signed.log
     Signed: <CHECKSUM_HEX>
+
+
+## Use it as a go package
+
+```go
+import "github.com/Nirzak/eac-logchecker/eaclogchecker"
+
+// Verify a log
+results := eaclogchecker.CheckChecksum("path/to/file.log")
+for _, r := range results {
+    fmt.Println(r.Status, r.Message)
+}
+
+// Sign a log
+err := eaclogchecker.SignLog("input.log", "output.log", false)
+```
 
 ## Algorithm
 

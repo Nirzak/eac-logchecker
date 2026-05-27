@@ -1,13 +1,9 @@
-// eac_logchecker.go — Go port of eac_logchecker.py
-// Verifies and resigns EAC (Exact Audio Copy) log checksums.
-// The checksum algorithm uses Rijndael-256 in CBC mode with a 256-bit block size.
-
-package main
+// Package eaclogchecker implements verification and signing of Exact Audio Copy
+// (EAC) log checksums using Rijndael-256 in CBC mode with a 256-bit block size.
+package eaclogchecker
 
 import (
 	"encoding/hex"
-	"encoding/json"
-	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -19,10 +15,7 @@ import (
 	"eac-logchecker/rijndael256"
 )
 
-const (
-	version = "0.8.1"
-	eacKey  = "9378716cf13e4265ae55338e940b376184da389e50647726b35f6f341ee3efd9"
-)
+const eacKey = "9378716cf13e4265ae55338e940b376184da389e50647726b35f6f341ee3efd9"
 
 // Result holds the outcome for a single log entry.
 type Result struct {
@@ -30,20 +23,21 @@ type Result struct {
 	Status  string `json:"status"`
 }
 
-// Log holds a single EAC log entry and its computed/expected checksums.
-type Log struct {
-	text        string
+// log holds a single EAC log entry and its computed/expected checksums.
+// Unexported; callers interact only through CheckChecksum and SignLog.
+type log struct {
+	text         string
 	unsignedText string
-	version     []string
-	modified    bool
-	oldChecksum string
-	checksum    string
+	version      []string
+	modified     bool
+	oldChecksum  string
+	checksum     string
 }
 
-// eacChecksum computes the Rijndael-256 CBC checksum of log.unsignedText
-// and stores the uppercase hex result in log.checksum.
-func eacChecksum(log *Log) error {
-	text := log.unsignedText
+// eacChecksum computes the Rijndael-256 CBC checksum of l.unsignedText
+// and stores the uppercase hex result in l.checksum.
+func eacChecksum(l *log) error {
+	text := l.unsignedText
 
 	// Strip newlines (the algorithm ignores them).
 	text = strings.ReplaceAll(text, "\r", "")
@@ -77,7 +71,7 @@ func eacChecksum(log *Log) error {
 	checksum := make([]byte, blockSize)
 	ciphertext := make([]byte, blockSize)
 
-	// CBC mode: process each 32-byte block (Python: range(0, len(plaintext), 32)).
+	// CBC mode: process each 32-byte block.
 	// If plaintext is empty the loop body never executes, matching Python behaviour.
 	for i := 0; i < len(plaintext); i += blockSize {
 		// Safe slice: cap at len(plaintext), then zero-pad to blockSize.
@@ -101,7 +95,7 @@ func eacChecksum(log *Log) error {
 		copy(checksum, ciphertext)
 	}
 
-	log.checksum = strings.ToUpper(hex.EncodeToString(checksum))
+	l.checksum = strings.ToUpper(hex.EncodeToString(checksum))
 	return nil
 }
 
@@ -109,25 +103,26 @@ func eacChecksum(log *Log) error {
 var versionLineRe = regexp.MustCompile(`^Exact Audio Copy`)
 
 // checksumBlockRe matches the trailing checksum block, e.g.:
-//   \n\n==== Log checksum A3B4C5... ====
+//
+//	\n\n==== Log checksum A3B4C5... ====
 var checksumBlockRe = regexp.MustCompile(`\n\n==== (.*?) ([A-Z0-9]+) ====`)
 
 // alphaStartRe matches lines that start with a letter (used to stop version search).
 var alphaStartRe = regexp.MustCompile(`^[a-zA-Z]`)
 
-// extractInfo parses log.text to find the EAC version and strip/record the
-// existing checksum block, storing the unsigned portion in log.unsignedText.
-func extractInfo(log *Log) {
-	if len(log.text) == 0 {
+// extractInfo parses l.text to find the EAC version and strip/record the
+// existing checksum block, storing the unsigned portion in l.unsignedText.
+func extractInfo(l *log) {
+	if len(l.text) == 0 {
 		return
 	}
 
 	// Find version on the first header line.
-	for _, line := range strings.Split(log.text, "\n") {
+	for _, line := range strings.Split(l.text, "\n") {
 		if versionLineRe.MatchString(line) {
 			fields := strings.Fields(line)
 			if len(fields) >= 6 {
-				log.version = fields[3:6]
+				l.version = fields[3:6]
 			}
 		} else if alphaStartRe.MatchString(line) {
 			break
@@ -135,29 +130,23 @@ func extractInfo(log *Log) {
 	}
 
 	// Find and strip the checksum block.
-	match := checksumBlockRe.FindStringSubmatchIndex(log.text)
-	if match != nil {
-		fullMatch := checksumBlockRe.FindStringSubmatch(log.text)
-		labelPart := fullMatch[1] // e.g. "Log checksum"
-		checksumPart := fullMatch[2]
+	if match := checksumBlockRe.FindStringSubmatch(l.text); match != nil {
+		labelPart := match[1]   // e.g. "Log checksum"
+		checksumPart := match[2] // e.g. "A3B4C5..."
 
 		search := "\n\n==== " + labelPart
-		parts := strings.SplitN(log.text, search, 2)
+		parts := strings.SplitN(l.text, search, 2)
 		if len(parts) == 2 {
-			log.unsignedText = parts[0]
-			// The checksum is the first token after the split point.
-			afterSplit := strings.TrimSpace(parts[1])
-			// checksumPart is already captured above.
-			_ = afterSplit
-			log.oldChecksum = checksumPart
+			l.unsignedText = parts[0]
+			l.oldChecksum = checksumPart
 		}
 	}
 }
 
-// eacVerify runs extractInfo then eacChecksum on the log.
-func eacVerify(log *Log) error {
-	extractInfo(log)
-	return eacChecksum(log)
+// eacVerify runs extractInfo then eacChecksum on the log entry.
+func eacVerify(l *log) error {
+	extractInfo(l)
+	return eacChecksum(l)
 }
 
 // separatorRe matches the 60-dash separator between multi-disc logs.
@@ -168,8 +157,8 @@ var separatorRe = regexp.MustCompile(`[^-]-{60}[^-]`)
 var splitRe = regexp.MustCompile(`(\n\n==== .* [A-Z0-9]+ ====)`)
 
 // getLogs decodes the raw UTF-16-LE bytes of an EAC log file and returns
-// one Log per ripping session contained in the file.
-func getLogs(data []byte) ([]*Log, error) {
+// one log entry per ripping session contained in the file.
+func getLogs(data []byte) ([]*log, error) {
 	// Decode UTF-16-LE.
 	if len(data)%2 != 0 {
 		data = append(data, 0)
@@ -213,7 +202,7 @@ func getLogs(data []byte) ([]*Log, error) {
 		}
 	}
 
-	var logs []*Log
+	var logs []*log
 
 	if len(pieces) > 1 {
 		length := len(pieces)
@@ -221,7 +210,7 @@ func getLogs(data []byte) ([]*Log, error) {
 			length--
 		}
 		for i := 0; i < length; i += 2 {
-			l := &Log{
+			l := &log{
 				text:         pieces[i] + pieces[i+1],
 				unsignedText: pieces[i] + pieces[i+1],
 			}
@@ -230,7 +219,6 @@ func getLogs(data []byte) ([]*Log, error) {
 				result := separatorRe.ReplaceAllStringFunc(l.text, func(m string) string {
 					return ""
 				})
-				// Count replacements manually.
 				count := len(separatorRe.FindAllString(l.text, -1))
 				if count == 0 {
 					l.modified = true
@@ -242,13 +230,13 @@ func getLogs(data []byte) ([]*Log, error) {
 			logs = append(logs, l)
 		}
 		for i := length; i < len(pieces); i++ {
-			logs = append(logs, &Log{
+			logs = append(logs, &log{
 				text:         pieces[i],
 				unsignedText: pieces[i],
 			})
 		}
 	} else if len(pieces) == 1 {
-		logs = append(logs, &Log{
+		logs = append(logs, &log{
 			text:         pieces[0],
 			unsignedText: pieces[0],
 		})
@@ -258,7 +246,7 @@ func getLogs(data []byte) ([]*Log, error) {
 }
 
 // CheckChecksum verifies the EAC checksum(s) in the given log file and
-// returns one Result per log entry.
+// returns one Result per log entry found in the file.
 func CheckChecksum(path string) []Result {
 	var output []Result
 
@@ -281,8 +269,8 @@ func CheckChecksum(path string) []Result {
 		return output
 	}
 
-	for _, log := range logs {
-		if err := eacVerify(log); err != nil {
+	for _, l := range logs {
+		if err := eacVerify(l); err != nil {
 			output = append(output, Result{
 				Status:  "NO",
 				Message: "Log entry has no checksum!",
@@ -292,10 +280,10 @@ func CheckChecksum(path string) []Result {
 
 		var status, message string
 		switch {
-		case len(log.version) == 0 || log.oldChecksum == "":
+		case len(l.version) == 0 || l.oldChecksum == "":
 			status = "NO"
 			message = "Log entry has no checksum!"
-		case log.modified || log.oldChecksum != log.checksum:
+		case l.modified || l.oldChecksum != l.checksum:
 			status = "BAD"
 			message = "Log entry was modified, checksum incorrect!"
 		default:
@@ -448,7 +436,7 @@ func SignLog(inputPath, outputPath string, force bool) error {
 
 	unsignedText, ver := signExtractInfo(text)
 
-	// Version check (skip when --force is set).
+	// Version check (skip when force is set).
 	if !force {
 		if ver == nil || !ver.atLeast(minSignVersion) {
 			return fmt.Errorf("EAC version is too old to be signed (use --force to override)")
@@ -456,7 +444,7 @@ func SignLog(inputPath, outputPath string, force bool) error {
 	}
 
 	// Compute the checksum over the unsigned text.
-	l := &Log{unsignedText: unsignedText}
+	l := &log{unsignedText: unsignedText}
 	if err := eacChecksum(l); err != nil {
 		return fmt.Errorf("checksum computation failed: %w", err)
 	}
@@ -479,70 +467,5 @@ func SignLog(inputPath, outputPath string, force bool) error {
 		return fmt.Errorf("cannot write %s: %w", outputPath, err)
 	}
 
-	fmt.Printf("Signed: %s\n", l.checksum)
 	return nil
-}
-
-// ---------------------------------------------------------------------------
-// CLI entry point
-// ---------------------------------------------------------------------------
-
-func main() {
-	// Dispatch the 'sign' subcommand before the default flag set so that
-	// sign-specific flags (--force) don't interfere with the verify flags.
-	if len(os.Args) > 1 && os.Args[1] == "sign" {
-		signCmd := flag.NewFlagSet("sign", flag.ExitOnError)
-		forceFlag := signCmd.Bool("force", false, "Force signing even if EAC version is too old")
-		signCmd.Usage = func() {
-			fmt.Fprintln(os.Stderr, "Usage: eac-logchecker sign [--force] <input_log> <output_log>")
-			signCmd.PrintDefaults()
-		}
-		_ = signCmd.Parse(os.Args[2:])
-		if signCmd.NArg() != 2 {
-			signCmd.Usage()
-			os.Exit(1)
-		}
-		if err := SignLog(signCmd.Arg(0), signCmd.Arg(1), *forceFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// Default: verify mode (existing behaviour).
-	var (
-		jsonFlag    = flag.Bool("json", false, "Output as JSON")
-		versionFlag = flag.Bool("version", false, "Print version and exit")
-	)
-	flag.Parse()
-
-	if *versionFlag {
-		fmt.Println("eac-logchecker " + version)
-		return
-	}
-
-	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "Usage: eac-logchecker [--json] [--version] <file>\n")
-		fmt.Fprintf(os.Stderr, "       eac-logchecker sign [--force] <input_log> <output_log>\n")
-		os.Exit(1)
-	}
-
-	filePath := flag.Arg(0)
-
-	if !*jsonFlag {
-		fmt.Println("Log Integrity Checker   (C) 2010 by Andre Wiethoff")
-		fmt.Println()
-	}
-
-	results := CheckChecksum(filePath)
-
-	if *jsonFlag {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetEscapeHTML(false)
-		_ = enc.Encode(results)
-	} else {
-		for i, r := range results {
-			fmt.Printf("%d. %s\n", i+1, r.Message)
-		}
-	}
 }
