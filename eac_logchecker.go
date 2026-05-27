@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 
@@ -307,7 +309,207 @@ func CheckChecksum(path string) []Result {
 	return output
 }
 
+// ---------------------------------------------------------------------------
+// Sign functionality
+// ---------------------------------------------------------------------------
+
+// minSignVersion is the minimum EAC version whose logs can be signed: V1.0 beta 1.
+// beta == math.MaxInt means a full release (greater than any beta number).
+var minSignVersion = eacSignVersion{major: 1, minor: 0, beta: 1}
+
+// eacSignVersion holds a structurally parsed EAC version for comparison.
+type eacSignVersion struct {
+	major, minor, beta int
+}
+
+// atLeast reports whether v >= min using the same ordering as Python tuples.
+func (v eacSignVersion) atLeast(min eacSignVersion) bool {
+	switch {
+	case v.major != min.major:
+		return v.major > min.major
+	case v.minor != min.minor:
+		return v.minor > min.minor
+	default:
+		return v.beta >= min.beta
+	}
+}
+
+// parseSignVersion parses the EAC version from the header line, e.g.
+// "Exact Audio Copy V1.0 beta 1 from ..."
+// Release versions (no "beta") have beta = math.MaxInt, so they compare
+// greater than any beta version, matching Python's float('+inf') behaviour.
+func parseSignVersion(line string) (eacSignVersion, bool) {
+	s := strings.TrimPrefix(line, "Exact Audio Copy ")
+	if idx := strings.Index(s, " from"); idx != -1 {
+		s = s[:idx]
+	}
+	// Strip leading 'V'
+	if len(s) < 2 || s[0] != 'V' {
+		return eacSignVersion{}, false
+	}
+	s = s[1:]
+
+	var majorMinorStr, betaStr string
+	isBeta := false
+	if parts := strings.SplitN(s, " beta ", 2); len(parts) == 2 {
+		majorMinorStr = parts[0]
+		// Beta number may be followed by more text; take the first token.
+		betaStr = strings.Fields(parts[1])[0]
+		isBeta = true
+	} else {
+		majorMinorStr = strings.Fields(s)[0]
+	}
+
+	mm := strings.SplitN(majorMinorStr, ".", 2)
+	if len(mm) != 2 {
+		return eacSignVersion{}, false
+	}
+	major, err1 := strconv.Atoi(strings.TrimSpace(mm[0]))
+	minor, err2 := strconv.Atoi(strings.TrimSpace(mm[1]))
+	if err1 != nil || err2 != nil {
+		return eacSignVersion{}, false
+	}
+
+	beta := math.MaxInt
+	if isBeta {
+		b, err := strconv.Atoi(strings.TrimSpace(betaStr))
+		if err != nil {
+			return eacSignVersion{}, false
+		}
+		beta = b
+	}
+
+	return eacSignVersion{major: major, minor: minor, beta: beta}, true
+}
+
+// signChecksumDelimiter is the CRLF-aware separator used in raw (non-normalised) log text.
+const signChecksumDelimiter = "\r\n\r\n==== Log checksum"
+
+// signExtractInfo extracts the unsigned text (with CRLF preserved) and the
+// parsed EAC version from a raw decoded log string.
+// If an existing checksum block is present it is stripped, matching the
+// Python eac.py extract_info() behaviour.
+func signExtractInfo(text string) (unsignedText string, ver *eacSignVersion) {
+	// Find the version line, stopping at the first non-header letter line.
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "Exact Audio Copy") {
+			if v, ok := parseSignVersion(line); ok {
+				v := v // capture
+				ver = &v
+			}
+		} else if alphaStartRe.MatchString(line) {
+			break
+		}
+	}
+
+	// Strip any existing checksum block so we get clean unsigned text.
+	unsignedText = text
+	if idx := strings.Index(text, signChecksumDelimiter); idx != -1 {
+		unsignedText = text[:idx]
+	}
+	return
+}
+
+// SignLog reads inputPath, strips any existing checksum, computes a fresh one,
+// and writes the signed log (UTF-16-LE with BOM) to outputPath.
+// When force is false the function refuses to sign logs from EAC versions
+// older than V1.0 beta 1.
+func SignLog(inputPath, outputPath string, force bool) error {
+	rawData, err := os.ReadFile(inputPath)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", inputPath, err)
+	}
+
+	// Decode UTF-16-LE.
+	if len(rawData)%2 != 0 {
+		rawData = append(rawData, 0)
+	}
+	u16in := make([]uint16, len(rawData)/2)
+	for i := range u16in {
+		u16in[i] = uint16(rawData[2*i]) | uint16(rawData[2*i+1])<<8
+	}
+	text := string(utf16.Decode(u16in))
+
+	// Strip BOM.
+	text = strings.TrimPrefix(text, "\ufeff")
+
+	// Truncate at the first null byte.
+	if idx := strings.Index(text, "\x00"); idx != -1 {
+		text = text[:idx]
+	}
+
+	// Guard against lines too long for EAC.
+	for _, line := range strings.Split(text, "\n") {
+		if len([]rune(line))+1 > 1<<13 {
+			return fmt.Errorf("EAC cannot handle lines longer than 2^13 chars")
+		}
+	}
+
+	unsignedText, ver := signExtractInfo(text)
+
+	// Version check (skip when --force is set).
+	if !force {
+		if ver == nil || !ver.atLeast(minSignVersion) {
+			return fmt.Errorf("EAC version is too old to be signed (use --force to override)")
+		}
+	}
+
+	// Compute the checksum over the unsigned text.
+	l := &Log{unsignedText: unsignedText}
+	if err := eacChecksum(l); err != nil {
+		return fmt.Errorf("checksum computation failed: %w", err)
+	}
+
+	// Build the signed text: unsigned body + CRLF checksum block.
+	signed := unsignedText + "\r\n\r\n==== Log checksum " + l.checksum + " ====\r\n"
+
+	// Encode as UTF-16-LE and prepend the UTF-16 LE BOM (0xFF 0xFE).
+	runes := []rune(signed)
+	u16out := utf16.Encode(runes)
+	out := make([]byte, 2+len(u16out)*2)
+	out[0] = 0xff // BOM
+	out[1] = 0xfe
+	for i, r := range u16out {
+		out[2+2*i] = byte(r)
+		out[2+2*i+1] = byte(r >> 8)
+	}
+
+	if err := os.WriteFile(outputPath, out, 0644); err != nil {
+		return fmt.Errorf("cannot write %s: %w", outputPath, err)
+	}
+
+	fmt.Printf("Signed: %s\n", l.checksum)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// CLI entry point
+// ---------------------------------------------------------------------------
+
 func main() {
+	// Dispatch the 'sign' subcommand before the default flag set so that
+	// sign-specific flags (--force) don't interfere with the verify flags.
+	if len(os.Args) > 1 && os.Args[1] == "sign" {
+		signCmd := flag.NewFlagSet("sign", flag.ExitOnError)
+		forceFlag := signCmd.Bool("force", false, "Force signing even if EAC version is too old")
+		signCmd.Usage = func() {
+			fmt.Fprintln(os.Stderr, "Usage: eac-logchecker sign [--force] <input_log> <output_log>")
+			signCmd.PrintDefaults()
+		}
+		_ = signCmd.Parse(os.Args[2:])
+		if signCmd.NArg() != 2 {
+			signCmd.Usage()
+			os.Exit(1)
+		}
+		if err := SignLog(signCmd.Arg(0), signCmd.Arg(1), *forceFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Default: verify mode (existing behaviour).
 	var (
 		jsonFlag    = flag.Bool("json", false, "Output as JSON")
 		versionFlag = flag.Bool("version", false, "Print version and exit")
@@ -320,7 +522,8 @@ func main() {
 	}
 
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "Usage: eac-logchecker [--json] [--version] <file>")
+		fmt.Fprintf(os.Stderr, "Usage: eac-logchecker [--json] [--version] <file>\n")
+		fmt.Fprintf(os.Stderr, "       eac-logchecker sign [--force] <input_log> <output_log>\n")
 		os.Exit(1)
 	}
 
