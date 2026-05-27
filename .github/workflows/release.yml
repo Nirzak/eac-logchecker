@@ -44,7 +44,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0 # Ensure statically linked binaries
         run: |
-          go build -ldflags="-s -w" -o eac-logchecker-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} .
+          go build -ldflags="-s -w" -o eac-logchecker-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/eac-logchecker
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
