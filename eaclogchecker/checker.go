@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"eac-logchecker/rijndael256"
+	"github.com/Nirzak/eac-logchecker/rijndael256"
 )
 
 const eacKey = "9378716cf13e4265ae55338e940b376184da389e50647726b35f6f341ee3efd9"
@@ -131,7 +131,7 @@ func extractInfo(l *log) {
 
 	// Find and strip the checksum block.
 	if match := checksumBlockRe.FindStringSubmatch(l.text); match != nil {
-		labelPart := match[1]   // e.g. "Log checksum"
+		labelPart := match[1]    // e.g. "Log checksum"
 		checksumPart := match[2] // e.g. "A3B4C5..."
 
 		search := "\n\n==== " + labelPart

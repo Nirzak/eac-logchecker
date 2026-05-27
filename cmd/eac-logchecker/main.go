@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"eac-logchecker/eaclogchecker"
+	"github.com/Nirzak/eac-logchecker/eaclogchecker"
 )
 
 const version = "1.0.0"

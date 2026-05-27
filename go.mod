@@ -1,3 +1,3 @@
-module eac-logchecker
+module github.com/Nirzak/eac-logchecker
 
 go 1.21
