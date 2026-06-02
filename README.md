@@ -6,7 +6,7 @@ This is a fork of https://github.com/puddly/eac_logsigner, with modifications to
 better match the output of the actual EAC Logchecker to be used in downstream applications. All
 credit goes to puddly for reverse-engineering the closed source EAC to develop the base.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/Nirzak/eac-logchecker.svg)](https://pkg.go.dev/github.com/Nirzak/eac-logchecker)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Nirzak/eac-logchecker)](https://goreportcard.com/report/github.com/Nirzak/eac-logchecker)  [![Go Reference](https://pkg.go.dev/badge/github.com/Nirzak/eac-logchecker.svg)](https://pkg.go.dev/github.com/Nirzak/eac-logchecker)
 
 ## Installation
 
