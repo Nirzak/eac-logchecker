@@ -1,25 +1,31 @@
 /*
-* ATENTION:
-* THIS CODE IS BASED ON https://github.com/agl/pond/tree/master/panda/rijndael
-*/
+ * ATTENTION:
+ * THIS CODE IS BASED ON https://github.com/agl/pond/tree/master/panda/rijndael
+ */
 
 package rijndael256
 
 import (
 	"crypto/cipher"
 	"encoding/binary"
+	"errors"
 )
 
 const rounds = 14
 const keyWords = 8
 const BlockSize = 32
-const blockWords = BlockSize/4
+const blockWords = BlockSize / 4
 
 type Cipher struct {
 	key [blockWords * (rounds + 1)]uint32
 }
 
+// NewCipher creates a new Rijndael-256 cipher. Key must be exactly 32 bytes.
 func NewCipher(key []byte) (cipher.Block, error) {
+	if len(key) != keyWords*4 {
+		return nil, errors.New("rijndael256: invalid key size, expected 32 bytes")
+	}
+
 	c := new(Cipher)
 
 	for i := 0; i < keyWords; i++ {
@@ -27,27 +33,35 @@ func NewCipher(key []byte) (cipher.Block, error) {
 	}
 
 	roundConstant := byte(1)
-	for i := keyWords; i < blockWords * (rounds + 1); i++ {
+	for i := keyWords; i < blockWords*(rounds+1); i++ {
 		temp := c.key[i-1]
-		if (i % keyWords == 0) {
+		switch i % keyWords {
+		case 0:
 			temp = subByte(rotByte(temp)) ^ (uint32(roundConstant) << 24)
 			roundConstant = xtime(roundConstant)
-		} else if (i % keyWords == 4) {
+		case 4:
 			temp = subByte(temp)
 		}
-		c.key[i] = c.key[i - keyWords] ^ temp
+		c.key[i] = c.key[i-keyWords] ^ temp
 	}
 
 	return c, nil
 }
 
 func (c *Cipher) BlockSize() int {
-	return BlockSize;
+	return BlockSize
 }
 
 func (c *Cipher) Encrypt(dst, src []byte) {
-	var state [4*blockWords]byte
-	copy(state[:], src[:])
+	if len(src) < BlockSize {
+		panic("rijndael256: input buffer too small")
+	}
+	if len(dst) < BlockSize {
+		panic("rijndael256: output buffer too small")
+	}
+
+	var state [4 * blockWords]byte
+	copy(state[:], src)
 
 	addKey(&state, c.key[:])
 
@@ -57,16 +71,10 @@ func (c *Cipher) Encrypt(dst, src []byte) {
 			state[i] = sbox[state[i]]
 		}
 
-		// ShiftRow
-		if blockWords == 32/4 {
-			shiftRow(&state, 1, 1)
-			shiftRow(&state, 2, 3)
-			shiftRow(&state, 3, 4)
-		} else {
-			shiftRow(&state, 1, 1)
-			shiftRow(&state, 2, 2)
-			shiftRow(&state, 3, 3)
-		}
+		// ShiftRow (blockWords == 8, always)
+		shiftRow(&state, 1, 1)
+		shiftRow(&state, 2, 3)
+		shiftRow(&state, 3, 4)
 
 		// MixColumns
 		for i := 0; i < blockWords; i++ {
@@ -76,45 +84,39 @@ func (c *Cipher) Encrypt(dst, src []byte) {
 		addKey(&state, c.key[blockWords*round:])
 	}
 
-	// ByteSub
+	// Final round: ByteSub + ShiftRow (no MixColumns)
 	for i := range state {
 		state[i] = sbox[state[i]]
 	}
 
-	// ShiftRow
-	if blockWords == 32/4 {
-		shiftRow(&state, 1, 1)
-		shiftRow(&state, 2, 3)
-		shiftRow(&state, 3, 4)
-	} else {
-		shiftRow(&state, 1, 1)
-		shiftRow(&state, 2, 2)
-		shiftRow(&state, 3, 3)
-	}
+	shiftRow(&state, 1, 1)
+	shiftRow(&state, 2, 3)
+	shiftRow(&state, 3, 4)
 
 	addKey(&state, c.key[blockWords*rounds:])
 
-	copy(dst[:], state[:])
+	copy(dst, state[:])
 }
 
 func (c *Cipher) Decrypt(dst, src []byte) {
-	var state [4*blockWords]byte
-	copy(state[:], src[:])
+	if len(src) < BlockSize {
+		panic("rijndael256: input buffer too small")
+	}
+	if len(dst) < BlockSize {
+		panic("rijndael256: output buffer too small")
+	}
+
+	var state [4 * blockWords]byte
+	copy(state[:], src)
 
 	addKey(&state, c.key[blockWords*rounds:])
 
-	// ShiftRow
-	if blockWords == 32/4 {
-		shiftRow(&state, 1, -1)
-		shiftRow(&state, 2, -3)
-		shiftRow(&state, 3, -4)
-	} else {
-		shiftRow(&state, 1, -1)
-		shiftRow(&state, 2, -2)
-		shiftRow(&state, 3, -3)
-	}
+	// Inverse ShiftRow (blockWords == 8, always)
+	shiftRow(&state, 1, -1)
+	shiftRow(&state, 2, -3)
+	shiftRow(&state, 3, -4)
 
-	// ByteSub
+	// Inverse ByteSub
 	for i := range state {
 		state[i] = sboxInv[state[i]]
 	}
@@ -122,23 +124,17 @@ func (c *Cipher) Decrypt(dst, src []byte) {
 	for round := rounds - 1; round >= 1; round-- {
 		addKey(&state, c.key[blockWords*round:])
 
-		// MixColumns
+		// Inverse MixColumns
 		for i := 0; i < blockWords; i++ {
 			mixColumnInv(state[4*i:])
 		}
 
-		// ShiftRow
-		if blockWords == 32/4 {
-			shiftRow(&state, 1, -1)
-			shiftRow(&state, 2, -3)
-			shiftRow(&state, 3, -4)
-		} else {
-			shiftRow(&state, 1, -1)
-			shiftRow(&state, 2, -2)
-			shiftRow(&state, 3, -3)
-		}
+		// Inverse ShiftRow
+		shiftRow(&state, 1, -1)
+		shiftRow(&state, 2, -3)
+		shiftRow(&state, 3, -4)
 
-		// ByteSub
+		// Inverse ByteSub
 		for i := range state {
 			state[i] = sboxInv[state[i]]
 		}
@@ -146,7 +142,7 @@ func (c *Cipher) Decrypt(dst, src []byte) {
 
 	addKey(&state, c.key[:])
 
-	copy(dst[:], state[:])
+	copy(dst, state[:])
 }
 
 func subByte(a uint32) uint32 {
@@ -164,7 +160,7 @@ func rotByte(a uint32) uint32 {
 	return (a >> 24) | (a << 8)
 }
 
-func addKey(state *[4*blockWords]byte, key []uint32) {
+func addKey(state *[4 * blockWords]byte, key []uint32) {
 	for i := 0; i < blockWords; i++ {
 		t := binary.BigEndian.Uint32(state[4*i:])
 		t ^= key[i]
@@ -172,23 +168,32 @@ func addKey(state *[4*blockWords]byte, key []uint32) {
 	}
 }
 
-func shiftRow(state *[4*blockWords]byte, row, shift int) {
+// shiftRow rotates row `row` left by `shift` positions.
+// Uses conditional subtraction instead of modulo for performance.
+func shiftRow(state *[4 * blockWords]byte, row, shift int) {
 	var input [blockWords]byte
 	for i := range input {
-		input[i] = state[row + 4*i]
+		input[i] = state[row+4*i]
 	}
 
 	src := shift
 	if src < 0 {
 		src += blockWords
 	}
+
 	dst := row
 	for i := 0; i < blockWords; i++ {
 		state[dst] = input[src]
+
 		dst += 4
-		dst %= blockWords*4
+		if dst >= blockWords*4 {
+			dst -= blockWords * 4
+		}
+
 		src++
-		src %= blockWords
+		if src >= blockWords {
+			src -= blockWords
+		}
 	}
 }
 
@@ -221,11 +226,10 @@ func mixColumnInv(col []byte) {
 	col[3] ^= y ^ xtime(d^a)
 }
 
+// xtime multiplies b by 2 in GF(2^8).
+// Avoids uint32 promotion — equivalent to the original but cleaner.
 func xtime(b byte) byte {
-	c := uint32(b)
-	c <<= 1
-	c ^= ((c >> 8) & 1) * 0x1b
-	return byte(c)
+	return (b << 1) ^ (-(b >> 7) & 0x1b)
 }
 
 // FIPS-197 Figure 7. S-box substitution values in hexadecimal format.
@@ -248,7 +252,7 @@ var sbox = [256]byte{
 	0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
 }
 
-// FIPS-197 Figure 14.  Inverse S-box substitution values in hexadecimal format.
+// FIPS-197 Figure 14. Inverse S-box substitution values in hexadecimal format.
 var sboxInv = [256]byte{
 	0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
 	0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
