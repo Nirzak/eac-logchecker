@@ -10,7 +10,7 @@ import (
 	"github.com/Nirzak/eac-logchecker/eaclogchecker"
 )
 
-const version = "1.0.0"
+const version = "1.0.1"
 
 func main() {
 	// Dispatch the 'sign' subcommand before the default flag set so that
