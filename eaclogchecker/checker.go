@@ -17,6 +17,12 @@ import (
 
 const eacKey = "9378716cf13e4265ae55338e940b376184da389e50647726b35f6f341ee3efd9"
 
+// bom is the Unicode byte-order mark stripped during log decoding.
+const bom = "\ufeff"
+
+// msgNoChecksum is returned when a log entry carries no valid checksum.
+const msgNoChecksum = "Log entry has no checksum!"
+
 // Result holds the outcome for a single log entry.
 type Result struct {
 	Message string `json:"message"`
@@ -44,7 +50,7 @@ func eacChecksum(l *log) error {
 	text = strings.ReplaceAll(text, "\n", "")
 
 	// Strip BOMs (fuzzing revealed these are also ignored).
-	text = strings.ReplaceAll(text, "\ufeff", "")
+	text = strings.ReplaceAll(text, bom, "")
 	text = strings.ReplaceAll(text, "\ufffe", "")
 
 	// Build the Rijndael-256 cipher.
@@ -156,10 +162,10 @@ var separatorRe = regexp.MustCompile(`[^-]-{60}[^-]`)
 // log entries (and their checksum blocks) can be paired up.
 var splitRe = regexp.MustCompile(`(\n\n==== .* [A-Z0-9]+ ====)`)
 
-// getLogs decodes the raw UTF-16-LE bytes of an EAC log file and returns
-// one log entry per ripping session contained in the file.
-func getLogs(data []byte) ([]*log, error) {
-	// Decode UTF-16-LE.
+// decodeUTF16LE converts raw UTF-16-LE bytes to a Go string, normalises line
+// endings, strips the BOM, and truncates at the first null byte.
+// Returns an error when any line exceeds EAC's 2^13-character limit.
+func decodeUTF16LE(data []byte) (string, error) {
 	if len(data)%2 != 0 {
 		data = append(data, 0)
 	}
@@ -170,9 +176,9 @@ func getLogs(data []byte) ([]*log, error) {
 	text := string(utf16.Decode(u16))
 
 	// Strip BOM.
-	text = strings.TrimPrefix(text, "\ufeff")
+	text = strings.TrimPrefix(text, bom)
 
-	// Normalise line endings (makes our own regexes simpler).
+	// Normalise line endings.
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 
 	// Null bytes corrupt the checksum — truncate at the first one.
@@ -183,15 +189,16 @@ func getLogs(data []byte) ([]*log, error) {
 	// EAC crashes on lines > 2^13 chars.
 	for _, line := range strings.Split(text, "\n") {
 		if len([]rune(line))+1 > 1<<13 {
-			return nil, fmt.Errorf("EAC cannot handle lines longer than 2^13 chars")
+			return "", fmt.Errorf("EAC cannot handle lines longer than 2^13 chars")
 		}
 	}
+	return text, nil
+}
 
-	// Split on checksum markers (keeps delimiters as separate elements).
+// buildPieces interleaves non-empty split bodies with their checksum delimiters.
+func buildPieces(text string) []string {
 	splits := splitRe.Split(text, -1)
 	delimiters := splitRe.FindAllString(text, -1)
-
-	// Reconstruct interleaved [body, delimiter] pairs, filtering empty pieces.
 	var pieces []string
 	for i, s := range splits {
 		if strings.TrimSpace(s) != "" {
@@ -201,10 +208,28 @@ func getLogs(data []byte) ([]*log, error) {
 			pieces = append(pieces, delimiters[i])
 		}
 	}
+	return pieces
+}
 
+// applyDiscSeparator strips the inter-disc separator from a subsequent log
+// entry, marking it modified when no separator is present.
+func applyDiscSeparator(l *log) {
+	result := separatorRe.ReplaceAllStringFunc(l.text, func(m string) string {
+		return ""
+	})
+	if len(separatorRe.FindAllString(l.text, -1)) == 0 {
+		l.modified = true
+	} else {
+		l.text = result
+		l.unsignedText = result
+	}
+}
+
+// buildLogs converts the interleaved pieces slice into a slice of log entries.
+func buildLogs(pieces []string) []*log {
 	var logs []*log
-
-	if len(pieces) > 1 {
+	switch {
+	case len(pieces) > 1:
 		length := len(pieces)
 		if length%2 == 1 {
 			length--
@@ -215,17 +240,7 @@ func getLogs(data []byte) ([]*log, error) {
 				unsignedText: pieces[i] + pieces[i+1],
 			}
 			if i > 0 {
-				// Remove the inter-disc separator from subsequent entries.
-				result := separatorRe.ReplaceAllStringFunc(l.text, func(m string) string {
-					return ""
-				})
-				count := len(separatorRe.FindAllString(l.text, -1))
-				if count == 0 {
-					l.modified = true
-				} else {
-					l.text = result
-					l.unsignedText = result
-				}
+				applyDiscSeparator(l)
 			}
 			logs = append(logs, l)
 		}
@@ -235,14 +250,23 @@ func getLogs(data []byte) ([]*log, error) {
 				unsignedText: pieces[i],
 			})
 		}
-	} else if len(pieces) == 1 {
+	case len(pieces) == 1:
 		logs = append(logs, &log{
 			text:         pieces[0],
 			unsignedText: pieces[0],
 		})
 	}
+	return logs
+}
 
-	return logs, nil
+// getLogs decodes the raw UTF-16-LE bytes of an EAC log file and returns
+// one log entry per ripping session contained in the file.
+func getLogs(data []byte) ([]*log, error) {
+	text, err := decodeUTF16LE(data)
+	if err != nil {
+		return nil, err
+	}
+	return buildLogs(buildPieces(text)), nil
 }
 
 // CheckChecksum verifies the EAC checksum(s) in the given log file and
@@ -264,7 +288,7 @@ func CheckChecksum(path string) []Result {
 		// Runtime errors (e.g. line too long) → treat as no checksum.
 		output = append(output, Result{
 			Status:  "NO",
-			Message: "Log entry has no checksum!",
+			Message: msgNoChecksum,
 		})
 		return output
 	}
@@ -273,7 +297,7 @@ func CheckChecksum(path string) []Result {
 		if err := eacVerify(l); err != nil {
 			output = append(output, Result{
 				Status:  "NO",
-				Message: "Log entry has no checksum!",
+				Message: msgNoChecksum,
 			})
 			continue
 		}
@@ -282,7 +306,7 @@ func CheckChecksum(path string) []Result {
 		switch {
 		case len(l.version) == 0 || l.oldChecksum == "":
 			status = "NO"
-			message = "Log entry has no checksum!"
+			message = msgNoChecksum
 		case l.modified || l.oldChecksum != l.checksum:
 			status = "BAD"
 			message = "Log entry was modified, checksum incorrect!"
@@ -420,7 +444,7 @@ func SignLog(inputPath, outputPath string, force bool) error {
 	text := string(utf16.Decode(u16in))
 
 	// Strip BOM.
-	text = strings.TrimPrefix(text, "\ufeff")
+	text = strings.TrimPrefix(text, bom)
 
 	// Truncate at the first null byte.
 	if idx := strings.Index(text, "\x00"); idx != -1 {
